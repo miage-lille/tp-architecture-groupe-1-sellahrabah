@@ -1,115 +1,139 @@
-import { BookSeat } from './book-seat';
-import { IParticipationRepository } from 'src/webinars/ports/participation-repository.interface';
-import { IWebinarRepository } from 'src/webinars/ports/webinar-repository.interface';
-import { IUserRepository } from 'src/users/ports/user-repository.interface';
 import { IMailer } from 'src/core/ports/mailer.interface';
+import { IWebinarRepository } from '../ports/webinar-repository.interface';
 import { User } from 'src/users/entities/user.entity';
-import { Webinar } from 'src/webinars/entities/webinar.entity';
-import { Participation } from 'src/webinars/entities/participation.entity';
+import { InMemoryParticipationRepository } from '../adapters/participation-repository.in-memory';
+import { UserRepositoryInMemory } from 'src/users/adapters/user-repository.in-memory';
+import { InMemoryWebinarRepository } from '../adapters/webinar-repository.in-memory';
+import { InMemoryMailer } from 'src/core/adapters/in-memory-mailer';
+import { BookSeat } from './book-seat';
+import { Webinar } from '../entities/webinar.entity';
+import { addDays } from 'date-fns';
+import { UserIsAlreadyRegistered } from 'src/users/exceptions/UserIsAlreadyRegistered';
+import { WebinarDatesTooSoonException } from '../exceptions/webinar-dates-too-soon';
+import { WebinarFullyBookedError } from '../exceptions/WebinarFullyBookedError';
+import { WebinarNotFoundError } from '../exceptions/WebinarNotFoundError';
 
-describe('BookSeat Use Case', () => {
-  let bookSeat: BookSeat;
-  let mockParticipationRepository: jest.Mocked<IParticipationRepository>;
-  let mockWebinarRepository: jest.Mocked<IWebinarRepository>;
-  let mockUserRepository: jest.Mocked<IUserRepository>;
-  let mockMailer: jest.Mocked<IMailer>;
+describe('Feature: Book a seat for a webinar', () => {
+
+  let mailer: IMailer;
+  let userRepository: UserRepositoryInMemory;
+  let useCase: BookSeat;
+  let webinarRepository: IWebinarRepository;
+  let participationRepository: InMemoryParticipationRepository;
+
+  let user: User;
+  let webinar: Webinar;
 
   beforeEach(() => {
-    mockParticipationRepository = {
-      findByWebinarId: jest.fn(),
-      save: jest.fn(),
-    };
-  
-    mockWebinarRepository = {
-      findById: jest.fn(),
-      create: jest.fn(), // Ajout de la méthode `create`
-    };
-  
-    mockUserRepository = {
-      findById: jest.fn(),
-    };
-  
-    mockMailer = {
-      send: jest.fn(),
-    };
-  
-    bookSeat = new BookSeat(
-      mockParticipationRepository,
-      mockUserRepository,
-      mockWebinarRepository,
-      mockMailer,
+    participationRepository = new InMemoryParticipationRepository();
+    userRepository = new UserRepositoryInMemory();
+    webinarRepository = new InMemoryWebinarRepository();
+    mailer = new InMemoryMailer();
+    useCase = new BookSeat(participationRepository, userRepository, webinarRepository, mailer);
+
+    user = new User({
+      id: 'USER-TEST-3O5E-3721',
+      email: 'user@mail.com',
+      password: 'password123',
+    });
+
+    webinar = new Webinar({
+      id: 'WEBINAR-TEST-HY65-SH23',
+      organizerId: 'ORGANIZER-TEST-M9P1-TE5R',
+      title: 'Webinar Test',
+      startDate: addDays(new Date(), 5),
+      endDate: addDays(new Date(), 6),
+      seats: 2,
+    });
+
+    webinarRepository.create(webinar);
+    userRepository.save(user);
+  });
+
+  it('should allow a user to book a seat if there are available seats', async () => {
+    await useCase.execute({ webinarId: webinar.props.id, user });
+
+    const participations = await participationRepository.findByWebinarId(webinar.props.id);
+    expect(participations.length).toBe(1);
+    expect(participations[0].props.userId).toBe(user.props.id);
+  });
+
+  it('should not allow booking if there are no available seats', async () => {
+    await useCase.execute({ webinarId: webinar.props.id, user });
+
+    const anotherUser = new User({
+      id: 'USER-TEST-Y6E5-P721',
+      email: 'another@mail.com',
+      password: 'password456',
+    });
+
+    userRepository.save(anotherUser);
+    await useCase.execute({ webinarId: webinar.props.id, user: anotherUser });
+
+    const lastUser = new User({
+      id: 'USER-TEST-89IE-L921',
+      email: 'last@mail.com',
+      password: 'password789',
+    });
+
+    userRepository.save(lastUser);
+
+    await expect(useCase.execute({ webinarId: webinar.props.id, user: lastUser })).rejects.toThrow(
+      new WebinarFullyBookedError().message
     );
   });
-  
+
+  it('should not allow a user to book twice for the same webinar', async () => {
+    await useCase.execute({ webinarId: webinar.props.id, user });
+
+    await expect(useCase.execute({ webinarId: webinar.props.id, user }))
+      .rejects.toThrow(new UserIsAlreadyRegistered().message);
+  });
+
+  it('should send an email to the organizer when a seat is booked', async () => {
+    await useCase.execute({ webinarId: webinar.props.id, user });
+
+    const inMemoryMailer = mailer as InMemoryMailer;
+
+    expect(inMemoryMailer.send.length).toBe(1);
+    expect(inMemoryMailer.sentEmails[0]).toEqual({
+      to: 'ORGANIZER-TEST-M9P1-TE5R',
+      subject: 'New participant registered',
+      body: `User has registered for webinar ${webinar.props.id}`,
+    });
+  });
 
   it('should throw an error if the webinar does not exist', async () => {
-    mockWebinarRepository.findById.mockResolvedValue(null);
-
-    await expect(
-      bookSeat.execute({ webinarId: 'webinar1', 
-                          user: new User({   
-                            id: '123',
-                            email: 'user@example.com',
-                            password: 'securepassword',}) 
-                        }),
-    ).rejects.toThrow('Webinar with ID webinar1 not found');
+    await expect(useCase.execute({ webinarId: 'invalid-id', user }))
+      .rejects.toThrow(new WebinarNotFoundError().message);
   });
 
-  it('should throw an error if the user does not exist', async () => {
-    mockWebinarRepository.findById.mockResolvedValue(
-      new Webinar({ id: 'webinar1', organizerId: 'org1', title: 'Webinar 1', startDate: new Date(), endDate: new Date(), seats: 10 }),
-    );
-    mockUserRepository.findById.mockResolvedValue(null);
-
-    await expect(
-      bookSeat.execute({ webinarId: 'webinar1', user: new User({ id: 'user1' ,email: 'user@example.com',password: 'securepassword' }) }),
-    ).rejects.toThrow('User with ID user1 not found');
-  });
-
-  it('should throw an error if the user is already registered', async () => {
-    mockWebinarRepository.findById.mockResolvedValue(
-      new Webinar({ id: 'webinar1', organizerId: 'org1', title: 'Webinar 1', startDate: new Date(), endDate: new Date(), seats: 10 }),
-    );
-    mockUserRepository.findById.mockResolvedValue(new User({ id: 'user1' ,email: 'user@example.com',password: 'securepassword' }));
-    mockParticipationRepository.findByWebinarId.mockResolvedValue([
-      new Participation({ webinarId: 'webinar1', userId: 'user1' }),
-    ]);
-
-    await expect(
-      bookSeat.execute({ webinarId: 'webinar1', user: new User({ id: 'user1' ,email: 'user@example.com',password: 'securepassword' }) }),
-    ).rejects.toThrow('User with ID user1 is already registered');
-  });
-
-  it('should throw an error if there are no seats available', async () => {
-    mockWebinarRepository.findById.mockResolvedValue(
-      new Webinar({ id: 'webinar1', organizerId: 'org1', title: 'Webinar 1', startDate: new Date(), endDate: new Date(), seats: 1 }),
-    );
-    mockUserRepository.findById.mockResolvedValue(new User({ id: 'user1' ,email: 'user@example.com',password: 'securepassword' }));
-    mockParticipationRepository.findByWebinarId.mockResolvedValue([
-      new Participation({ webinarId: 'webinar1', userId: 'user2' }),
-    ]);
-
-    await expect(
-      bookSeat.execute({ webinarId: 'webinar1', user: new User({ id: 'user1' ,email: 'user@example.com',password: 'securepassword' }) }),
-    ).rejects.toThrow('No seats available for webinar with ID webinar1');
-  });
-
-  it('should successfully book a seat and send an email', async () => {
-    mockWebinarRepository.findById.mockResolvedValue(
-      new Webinar({ id: 'webinar1', organizerId: 'org1', title: 'Webinar 1', startDate: new Date(), endDate: new Date(), seats: 10 }),
-    );
-    mockUserRepository.findById.mockResolvedValue(new User({ id: 'user1' ,email: 'user@example.com',password: 'securepassword' }));
-    mockParticipationRepository.findByWebinarId.mockResolvedValue([]);
-
-    await bookSeat.execute({ webinarId: 'webinar1', user: new User({id: 'user1' ,email: 'user@example.com',password: 'securepassword'}) });
-
-    expect(mockParticipationRepository.save).toHaveBeenCalledWith(
-      expect.objectContaining({ props: { webinarId: 'webinar1', userId: 'user1' } }),
-    );
-    expect(mockMailer.send).toHaveBeenCalledWith({
-      to: 'org1',
-      subject: 'New participant registered',
-      body: 'User user1 has registered for webinar webinar1',
+  it('should not allow booking if the webinar starts too soon', async () => {
+    const webinarTooSoon = new Webinar({
+      id: 'WEBINAR-TOO-SOON',
+      organizerId: 'ORGANIZER-TEST',
+      title: 'Soon Webinar',
+      startDate: addDays(new Date(), 2), // Moins de 3 jours
+      endDate: addDays(new Date(), 3),
+      seats: 5,
     });
+
+    await webinarRepository.create(webinarTooSoon);
+
+    await expect(useCase.execute({ webinarId: webinarTooSoon.props.id, user }))
+      .rejects.toThrow(WebinarDatesTooSoonException);
+  });
+
+  it('should create user if user does not exist before booking', async () => {
+    const newUser = new User({
+      id: 'NEW-USER',
+      email: 'newuser@mail.com',
+      password: 'password123',
+    });
+
+    await useCase.execute({ webinarId: webinar.props.id, user: newUser });
+
+    const savedUser = await userRepository.findById(newUser.props.id);
+    expect(savedUser).toBeDefined();
   });
 });

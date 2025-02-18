@@ -3,6 +3,7 @@ import { IWebinarRepository } from 'src/webinars/ports/webinar-repository.interf
 
 export class InMemoryWebinarRepository implements IWebinarRepository {
   constructor(public database: Webinar[] = []) {}
+  
   async create(webinar: Webinar): Promise<void> {
     this.database.push(webinar);
   }
